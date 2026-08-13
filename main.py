@@ -6,6 +6,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from datetime import datetime, timezone
 from typing import Optional, List
+from contextlib import asynccontextmanager
 import os
 import aiofiles
 import json
@@ -23,15 +24,20 @@ from auth import (
 )
 from services.weather import get_weather
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Initialize DB tables on startup
+    init_db()
+    yield
+
+
 app = FastAPI(
     title="SendIt Document Management & Enrichment API",
     version="1.0.0",
-    description="Lab 9 API for digitizing waybills, managing uploads, and external weather enrichment."
+    description="Lab 9 API for digitizing waybills, managing uploads, and external weather enrichment.",
+    lifespan=lifespan
 )
-
-@app.on_event("startup")
-def on_startup():
-    init_db()
 
 # Rate Limiting setup
 limiter = Limiter(key_func=get_remote_address)
@@ -40,8 +46,14 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-MAX_FILE_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", 5 * 1024 * 1024))
+
+try:
+    MAX_FILE_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", 5 * 1024 * 1024))
+except ValueError:
+    MAX_FILE_SIZE = 5 * 1024 * 1024
+
 ALLOWED_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png", ".docx"]
+
 
 async def dispatch_webhook(event_type: str, payload: dict, session: Session):
     subscriptions = session.exec(
@@ -63,6 +75,7 @@ async def dispatch_webhook(event_type: str, payload: dict, session: Session):
             except Exception as e:
                 print(f"Webhook delivery failed for {sub.target_url}: {e}")
 
+
 # AUTHENTICATION
 @app.post("/auth/register", response_model=UserResponse, status_code=201, tags=["Authentication"])
 def register(user_data: UserCreate, session: Session = Depends(get_session)):
@@ -82,6 +95,7 @@ def register(user_data: UserCreate, session: Session = Depends(get_session)):
     session.refresh(user)
     return user
 
+
 @app.post("/auth/login", response_model=TokenResponse, tags=["Authentication"])
 def login(form_data: OAuth2PasswordRequestForm = Depends(), session: Session = Depends(get_session)):
     user = session.exec(select(User).where(User.username == form_data.username)).first()
@@ -94,6 +108,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), session: Session = D
 
     access_token = create_access_token(data={"sub": user.username, "role": user.role})
     return {"access_token": access_token, "token_type": "bearer"}
+
 
 # FILE UPLOADS
 @app.post("/documents/upload", status_code=201, tags=["Documents"])
@@ -155,6 +170,7 @@ async def upload_document(
     await dispatch_webhook("document.uploaded", {"document_id": document.id, "status": document.status}, session)
     return {"message": "Upload complete", "document_id": document.id, "status": document.status}
 
+
 # EXERCISE 1: SEARCH
 @app.get("/documents/search", tags=["Exercise 1 - Search"])
 @limiter.limit("20/minute")
@@ -184,6 +200,7 @@ def search_documents(
         query = query.where(Document.uploaded_at <= date_to)
 
     return session.exec(query).all()
+
 
 # EXERCISE 2: VERSIONING
 @app.post("/documents/upload/versioned", tags=["Exercise 2 - Versioning"])
@@ -236,6 +253,7 @@ async def upload_document_versioned(
     session.commit()
     return {"message": "Version uploaded", "version": new_version, "document_id": document.id}
 
+
 # EXERCISE 3: WEBHOOKS
 @app.post("/webhooks/register", tags=["Exercise 3 - Webhooks"])
 def register_webhook(
@@ -249,6 +267,7 @@ def register_webhook(
     session.commit()
     session.refresh(subscription)
     return {"message": "Webhook registered successfully", "subscription": subscription}
+
 
 # MANUAL ENRICHMENT
 @app.post("/documents/{document_id}/enrich", tags=["Enrichment"])
